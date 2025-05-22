@@ -235,29 +235,99 @@ export default class PasteImageRenamePlugin extends Plugin {
 
 	async batchRenameAllImages() {
 		const activeFile = this.getActiveFile()
+		if (!activeFile) {
+			new Notice('Error: No active file found for batch renaming.')
+			return
+		}
+		const editor = this.getActiveEditor()
+		if (!editor) {
+			new Notice('Error: No active editor found for batch renaming.')
+			return
+		}
+		let currentEditorContent = editor.getValue()
+
 		const fileCache = this.app.metadataCache.getFileCache(activeFile)
-		if (!fileCache || !fileCache.embeds) return
+		if (!fileCache || !fileCache.embeds) {
+			new Notice('No embedded files found in the current file.')
+			return
+		}
+
 		const extPatternRegex = /jpe?g|png|gif|tiff|webp/i
+		const renameOps: { file: TFile, oldLinkText: string, finalNewNameWithSpaces: string, correctNewLinkText: string, newPath: string }[] = [];
 
 		for (const embed of fileCache.embeds) {
 			const file = this.app.metadataCache.getFirstLinkpathDest(embed.link, activeFile.path)
-			if (!file) {
-				console.warn('file not found', embed.link)
-				return
+			if (!file || !(file instanceof TFile)) {
+				console.warn('file not found or not a TFile for embed:', embed.link)
+				continue; 
 			}
-			// match ext
+			
 			const m0 = extPatternRegex.exec(file.extension)
-			if (!m0) return
-
-			// rename
-			const { newName, isMeaningful }= this.generateNewName(file, activeFile)
-			debugLog('generated newName:', newName, isMeaningful)
-			if (!isMeaningful) {
-				new Notice('Failed to batch rename images: the generated name is not meaningful')
-				break;
+			if (!m0) {
+				debugLog('Skipping non-image file:', file.name)
+				continue; 
 			}
 
-			await this.renameFile(file, newName, activeFile.path, false)
+			const { stem: newNameStem, isMeaningful } = this.generateNewName(file, activeFile)
+			debugLog('generated newNameStem:', newNameStem, 'isMeaningful:', isMeaningful)
+			if (!isMeaningful) {
+				new Notice(`Generated name for "${file.name}" is not meaningful. Skipping this image.`)
+				continue;
+			}
+
+			const { name: finalNewNameWithSpaces } = await this.deduplicateNewName(newNameStem + '.' + file.extension, file);
+			const oldLinkText = this.app.fileManager.generateMarkdownLink(file, activeFile.path);
+
+			let correctNewLinkText: string;
+			const useMarkdownLinks = getVaultConfig(this.app)?.useMarkdownLinks;
+
+			if (useMarkdownLinks) {
+				const encodedPath = finalNewNameWithSpaces.split('/').map(segment => encodeURIComponent(segment)).join('/');
+				correctNewLinkText = `![](${encodedPath})`;
+			} else {
+				correctNewLinkText = `![[${finalNewNameWithSpaces}]]`;
+			}
+			
+			const newPath = path.join(file.parent.path, finalNewNameWithSpaces);
+
+			renameOps.push({ file, oldLinkText, finalNewNameWithSpaces, correctNewLinkText, newPath });
+			debugLog('Rename op collected:', { oldLinkText, correctNewLinkText, newPath });
+		}
+
+		if (renameOps.length === 0) {
+			new Notice('No images to rename in the current file based on criteria.')
+			return
+		}
+
+		// Update editor content in memory
+		for (const op of renameOps) {
+			currentEditorContent = currentEditorContent.replace(new RegExp(escapeRegExp(op.oldLinkText), 'g'), op.correctNewLinkText);
+		}
+
+		// Apply content changes to the editor
+		editor.setValue(currentEditorContent);
+
+		// Perform actual file renaming
+		let renamedCount = 0;
+		let errorCount = 0;
+		for (const op of renameOps) {
+			try {
+				await this.app.fileManager.renameFile(op.file, op.newPath);
+				renamedCount++;
+			} catch (err) {
+				errorCount++;
+				new Notice(`Failed to rename ${op.file.name} to ${op.finalNewNameWithSpaces}: ${err}`);
+				console.error(`Failed to rename ${op.file.name} to ${op.finalNewNameWithSpaces}:`, err);
+			}
+		}
+
+		if (renamedCount > 0 && !this.settings.disableRenameNotice) {
+			new Notice(`Batch rename complete: ${renamedCount} image(s) processed. ${errorCount > 0 ? errorCount + ' error(s).' : ''}`);
+		} else if (errorCount > 0 && renamedCount === 0 && !this.settings.disableRenameNotice) {
+			new Notice(`Batch rename failed for all ${errorCount} image(s).`);
+		} else if (renamedCount === 0 && errorCount === 0 && !this.settings.disableRenameNotice){
+			// This case might be redundant if "No images to rename" was already shown.
+			new Notice('No images were ultimately renamed.');
 		}
 	}
 
