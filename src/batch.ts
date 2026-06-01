@@ -1,267 +1,153 @@
-import { Modal, TFile, App, Setting } from 'obsidian';
+import { App, Modal, Notice, Setting, TFile } from 'obsidian';
 
-import {
-  path, createElementTree, debugLog, lockInputMethodComposition,
-} from './utils';
+import { debugLog, escapeRegExp, path } from './utils';
+import type PasteImageRenamePlugin from './main';
 
-interface State {
-	namePattern: string
-	extPattern: string
-	nameReplace: string
-	renameTasks: RenameTask[]
+const IMAGE_EXT_PATTERN = /^(jpe?g|png|gif|tiff|webp|bmp|svg)$/i
+const TMP_PREFIX = '.__pir_tmp__'
+
+export function stemMatchesFileNamePattern(
+	stem: string,
+	fileNameStem: string,
+	dupNumberAtStart: boolean,
+	dupNumberDelimiter: string,
+): boolean {
+	if (stem === fileNameStem) return true
+	const stemEscaped = escapeRegExp(fileNameStem)
+	const delimEscaped = escapeRegExp(dupNumberDelimiter)
+	if (dupNumberAtStart) {
+		return new RegExp(`^\\d+${delimEscaped}${stemEscaped}$`).test(stem)
+	}
+	return new RegExp(`^${stemEscaped}${delimEscaped}\\d+$`).test(stem)
 }
 
-interface RenameTask {
-	file: TFile
-	name: string
+export function indexedStem(
+	fileNameStem: string,
+	index: number,
+	dupNumberAtStart: boolean,
+	dupNumberDelimiter: string,
+	dupNumberAlways: boolean,
+): string {
+	const needsNumber = dupNumberAlways || index > 0
+	if (!needsNumber) return fileNameStem
+	const num = dupNumberAlways ? index + 1 : index
+	if (dupNumberAtStart) {
+		return `${num}${dupNumberDelimiter}${fileNameStem}`
+	}
+	return `${fileNameStem}${dupNumberDelimiter}${num}`
 }
 
-type renameFuncType = (file: TFile, name: string) => Promise<void>
+export async function batchRenumberImages(plugin: PasteImageRenamePlugin): Promise<void> {
+	const activeFile = plugin.getActiveFile()
+	if (!activeFile) {
+		new Notice('错误：未找到当前活动文件。')
+		return
+	}
 
-export class ImageBatchRenameModal extends Modal {
-	activeFile: TFile
-	renameFunc: renameFuncType
-	onCloseExtra: () => void
-	state: State
+	const fileNameStem = activeFile.basename
+	const { dupNumberAtStart, dupNumberDelimiter, dupNumberAlways, disableRenameNotice } = plugin.settings
 
-	constructor(app: App, activeFile: TFile, renameFunc: renameFuncType, onClose: () => void) {
-		super(app);
-		this.activeFile = activeFile
-		this.renameFunc = renameFunc
-		this.onCloseExtra = onClose
+	const fileCache = plugin.app.metadataCache.getFileCache(activeFile)
+	if (!fileCache?.embeds?.length) {
+		new Notice('当前文件中没有嵌入的图片。')
+		return
+	}
 
-		this.state = {
-			namePattern: '',
-			extPattern: '',
-			nameReplace: '',
-			renameTasks: [],
+	const matched: TFile[] = []
+
+	for (const embed of fileCache.embeds) {
+		const file = plugin.app.metadataCache.getFirstLinkpathDest(embed.link, activeFile.path)
+		if (!file || !IMAGE_EXT_PATTERN.test(file.extension)) continue
+		if (!stemMatchesFileNamePattern(file.basename, fileNameStem, dupNumberAtStart, dupNumberDelimiter)) {
+			continue
+		}
+		matched.push(file)
+	}
+
+	const tasks: { file: TFile; targetName: string }[] = []
+	for (let i = 0; i < matched.length; i++) {
+		const file = matched[i]
+		const targetStem = indexedStem(
+			fileNameStem,
+			i,
+			dupNumberAtStart,
+			dupNumberDelimiter,
+			dupNumberAlways,
+		)
+		const targetName = `${targetStem}.${file.extension}`
+		if (file.name !== targetName) {
+			tasks.push({ file, targetName })
 		}
 	}
 
-	onOpen() {
-		this.containerEl.addClass('image-rename-modal')
-		const { contentEl, titleEl } = this;
-		titleEl.setText('Batch rename embeded files')
-
-		const namePatternSetting = new Setting(contentEl)
-			.setName('Name pattern')
-			.setDesc('Please input the name pattern to match files (regex)')
-			.addText(text => text
-				.setValue(this.state.namePattern)
-				.onChange(async (value) => {
-					this.state.namePattern = value
-				}
-				))
-		const npInputEl = namePatternSetting.controlEl.children[0] as HTMLInputElement
-		npInputEl.focus()
-		const npInputState = lockInputMethodComposition(npInputEl)
-		npInputEl.addEventListener('keydown', async (e) => {
-			if (e.key === 'Enter' && !npInputState.lock) {
-				e.preventDefault()
-				if (!this.state.namePattern) {
-					errorEl.innerText = 'Error: "Name pattern" could not be empty'
-					errorEl.style.display = 'block'
-					return
-				}
-				this.matchImageNames(tbodyEl)
-			}
-		})
-
-		const extPatternSetting = new Setting(contentEl)
-			.setName('Extension pattern')
-			.setDesc('Please input the extension pattern to match files (regex)')
-			.addText(text => text
-				.setValue(this.state.extPattern)
-				.onChange(async (value) => {
-					this.state.extPattern = value
-				}
-				))
-		const extInputEl = extPatternSetting.controlEl.children[0] as HTMLInputElement
-		extInputEl.addEventListener('keydown', async (e) => {
-			if (e.key === 'Enter') {
-				e.preventDefault()
-				this.matchImageNames(tbodyEl)
-			}
-		})
-
-		const nameReplaceSetting = new Setting(contentEl)
-			.setName('Name replace')
-			.setDesc('Please input the string to replace the matched name (use $1, $2 for regex groups)')
-			.addText(text => text
-				.setValue(this.state.nameReplace)
-				.onChange(async (value) => {
-					this.state.nameReplace = value
-				}
-				))
-
-		const nrInputEl = nameReplaceSetting.controlEl.children[0] as HTMLInputElement
-		const nrInputState = lockInputMethodComposition(nrInputEl)
-		nrInputEl.addEventListener('keydown', async (e) => {
-			if (e.key === 'Enter' && !nrInputState.lock) {
-				e.preventDefault()
-				this.matchImageNames(tbodyEl)
-			}
-		})
-
-
-		const matchedContainer = contentEl.createDiv({
-			cls: 'matched-container',
-		})
-		const tableET = createElementTree(matchedContainer, {
-			tag: 'table',
-			children: [
-				{
-					tag: 'thead',
-					children: [
-						{
-							tag: 'tr',
-							children: [
-								{
-									tag: 'td',
-									text: 'Original path',
-								},
-								{
-									tag: 'td',
-									text: 'Renamed Name',
-								}
-							]
-						}
-					]
-				},
-				{
-					tag: 'tbody',
-				}
-			]
-		})
-		const tbodyEl = tableET.children[1].el
-
-		const errorEl = contentEl.createDiv({
-			cls: 'error',
-			attr: {
-				style: 'display: none;',
-			}
-		})
-
-		new Setting(contentEl)
-			.addButton(button => {
-				button
-					.setButtonText('Rename all')
-					.setClass('mod-cta')
-					.onClick(() => {
-						new ConfirmModal(
-							this.app,
-							'Confirm rename all',
-							`Are you sure? This will rename all the ${this.state.renameTasks.length} images matched the pattern.`,
-							() => {
-								this.renameAll()
-								this.close()
-							}
-						).open()
-					})
-			})
-			.addButton(button => {
-				button
-					.setButtonText('Cancel')
-					.onClick(() => { this.close() })
-			})
+	if (matched.length === 0) {
+		new Notice('当前文件中没有名称前缀与当前笔记文件名匹配的图片。')
+		return
+	}
+	if (tasks.length === 0) {
+		new Notice('匹配的图片已按文档顺序正确编号，无需重命名。')
+		return
 	}
 
-	onClose() {
-		const { contentEl } = this;
-		contentEl.empty();
-		this.onCloseExtra()
-	}
+	new ConfirmModal(
+		plugin.app,
+		'确认批量重命名',
+		`将按文档中的出现顺序，把 ${matched.length} 张匹配「${fileNameStem}」前缀的图片重新编号（其中 ${tasks.length} 张需要重命名）。`,
+		() => executeRenames(plugin, tasks, disableRenameNotice),
+	).open()
+}
 
-	async renameAll() {
-		debugLog('renameAll', this.state)
-		for (const task of this.state.renameTasks) {
-			await this.renameFunc(task.file, task.name)
-		}
-	}
+async function executeRenames(
+	plugin: PasteImageRenamePlugin,
+	tasks: { file: TFile; targetName: string }[],
+	disableRenameNotice: boolean,
+): Promise<void> {
+	debugLog('batchRenumber tasks', tasks)
 
-	matchImageNames(tbodyEl: HTMLElement) {
-		const { state } = this
-		const renameTasks: RenameTask[] = []
-		tbodyEl.empty()
-		const fileCache = this.app.metadataCache.getFileCache(this.activeFile)
-		if (!fileCache || !fileCache.embeds) return
-
-		const namePatternRegex = new RegExp(state.namePattern, 'g')
-		const extPatternRegex = new RegExp(state.extPattern)
-		fileCache.embeds.forEach(embed => {
-			const file = this.app.metadataCache.getFirstLinkpathDest(embed.link, this.activeFile.path)
-			if (!file) {
-				console.warn('file not found', embed.link)
-				return
-			}
-			// match ext (only if extPattern is not empty)
-			if (state.extPattern) {
-				const m0 = extPatternRegex.exec(file.extension)
-				if (!m0) return
-			}
-
-			// match stem
-			const stem = file.basename
-			namePatternRegex.lastIndex = 0
-			const m1 = namePatternRegex.exec(stem)
-			if (!m1) return
-
-			let renamedName = file.name
-			if (state.nameReplace) {
-				namePatternRegex.lastIndex = 0
-				renamedName = stem.replace(namePatternRegex, state.nameReplace)
-				renamedName = `${renamedName}.${file.extension}`
-			}
-			renameTasks.push({
+	// 两阶段重命名，避免目标文件名互相冲突
+	const tempNames: string[] = []
+	for (let i = 0; i < tasks.length; i++) {
+		const { file } = tasks[i]
+		const tempName = `${TMP_PREFIX}${i}.${file.extension}`
+		tempNames.push(tempName)
+		try {
+			await plugin.app.fileManager.renameFile(
 				file,
-				name: renamedName,
-			})
+				path.join(file.parent.path, tempName),
+			)
+		} catch (err) {
+			new Notice(`重命名失败 ${file.name}: ${err}`)
+			return
+		}
+	}
 
-			createElementTree(tbodyEl, {
-				tag: 'tr',
-				children: [
-					{
-						tag: 'td',
-						children: [
-							{
-								tag: 'span',
-								text: file.name,
-							},
-							{
-								tag: 'div',
-								text: file.path,
-								attr: {
-									class: 'file-path',
-								}
-							}
-						]
-					},
-					{
-						tag: 'td',
-						children: [
-							{
-								tag: 'span',
-								text: renamedName,
-							},
-							{
-								tag: 'div',
-								text: path.join(file.parent.path, renamedName),
-								attr: {
-									class: 'file-path',
-								}
-							}
-						]
-					}
-				]
+	for (let i = 0; i < tasks.length; i++) {
+		const tempPath = path.join(tasks[i].file.parent.path, tempNames[i])
+		const tempFile = plugin.app.vault.getAbstractFileByPath(tempPath)
+		if (!(tempFile instanceof TFile)) {
+			new Notice(`重命名失败：找不到临时文件 ${tempNames[i]}`)
+			return
+		}
+		const { targetName } = tasks[i]
+		const originName = tempFile.name
+		try {
+			await plugin.app.fileManager.renameFile(
+				tempFile,
+				path.join(tempFile.parent.path, targetName),
+			)
+		} catch (err) {
+			new Notice(`重命名失败 ${targetName}: ${err}`)
+			return
+		}
+		if (!disableRenameNotice) {
+			new Notice(`已重命名 ${originName} → ${targetName}`)
+		}
+	}
 
-			})
-		})
-
-		debugLog('new renameTasks', renameTasks)
-		state.renameTasks = renameTasks
+	if (!disableRenameNotice) {
+		new Notice(`已完成 ${tasks.length} 张图片的顺序重编号。`)
 	}
 }
-
 
 class ConfirmModal extends Modal {
 	title: string
@@ -285,7 +171,7 @@ class ConfirmModal extends Modal {
 		new Setting(contentEl)
 			.addButton(button => {
 				button
-					.setButtonText('Yes')
+					.setButtonText('确认')
 					.setClass('mod-warning')
 					.onClick(() => {
 						this.onConfirm()
@@ -294,7 +180,7 @@ class ConfirmModal extends Modal {
 			})
 			.addButton(button => {
 				button
-					.setButtonText('No')
+					.setButtonText('取消')
 					.onClick(() => { this.close() })
 			})
 	}
