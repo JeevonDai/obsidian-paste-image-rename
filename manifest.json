@@ -3,7 +3,7 @@
 	"name": "Paste image rename",
 	"version": "1.6.1",
 	"minAppVersion": "0.12.0",
-	"description": "按文档顺序重新编号与当前笔记同名的嵌入图片",
+	"description": "按文档顺序重新编号附件文件；不直接修改 .md 正文中的链接",
 	"author": "Reorx",
 	"authorUrl": "https://github.com/reorx",
 	"isDesktopOnly": false

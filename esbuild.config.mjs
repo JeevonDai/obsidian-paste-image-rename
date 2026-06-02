@@ -13,14 +13,12 @@ let runScriptPlugin = {
 			if (result.errors.length > 0) {
 				return
 			}
-			const scriptName = 'sync-plugin.sh'
-			if (!fs.existsSync(scriptName)) {
-				return
-			}
-			console.log(`run ${scriptName}`);
-			child_process.exec(`bash ${scriptName}`, (err, stdout, stderr) => {
+			console.log('run sync-plugin.mjs')
+			child_process.exec('node sync-plugin.mjs', (err, stdout, stderr) => {
+				if (stdout) process.stdout.write(stdout)
+				if (stderr) process.stderr.write(stderr)
 				if (err) {
-					console.error(`run ${scriptName} error:`, err, stdout, stderr)
+					console.error('run sync-plugin.mjs error:', err)
 				}
 			})
 		})

@@ -1,5 +1,6 @@
 import {
   App,
+  TFile,
   Vault,
 } from 'obsidian';
 
@@ -10,6 +11,24 @@ export function debugLog(...args: any[]) {
 	if (DEBUG) {
 		console.log((new Date()).toISOString().slice(11, 23), ...args)
 	}
+}
+
+/**
+ * 仅重命名库内附件文件，不通过 FileManager 批量改写 .md 中的链接。
+ * 笔记内链接由 Obsidian 或其它插件根据重命名事件自行更新。
+ */
+export async function renameVaultAttachment(
+	app: App,
+	file: TFile,
+	newPath: string,
+): Promise<TFile> {
+	if (file.path === newPath) return file
+	await app.vault.rename(file, newPath)
+	const renamed = app.vault.getAbstractFileByPath(newPath)
+	if (!(renamed instanceof TFile)) {
+		throw new Error(`重命名后找不到文件: ${newPath}`)
+	}
+	return renamed
 }
 
 interface ElementTreeOptions extends DomElementInfo {

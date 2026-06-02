@@ -19,13 +19,16 @@ interface PluginSettings {
 	dupNumberAtStart: boolean
 	dupNumberDelimiter: string
 	dupNumberAlways: boolean
+	/** 序号起始值（第一张带序号的图片使用该数字） */
+	numberStart: number
 	disableRenameNotice: boolean
 }
 
 const DEFAULT_SETTINGS: PluginSettings = {
 	dupNumberAtStart: false,
-	dupNumberDelimiter: '-',
-	dupNumberAlways: false,
+	dupNumberDelimiter: '_',
+	dupNumberAlways: true,
+	numberStart: 1,
 	disableRenameNotice: false,
 }
 
@@ -84,7 +87,7 @@ class SettingTab extends PluginSettingTab {
 		containerEl.empty();
 
 		containerEl.createEl('p', {
-			text: '图片名称固定为当前笔记文件名（{{fileName}}）。批量重命名仅处理名称前缀与当前文件名匹配、且带有序号后缀的图片，并按在文档中的出现顺序重新编号。',
+			text: '图片名称固定为当前笔记文件名。批量重命名会修改附件文件名，并按文档顺序同步更新当前笔记中的嵌入链接',
 		})
 
 		new Setting(containerEl)
@@ -100,7 +103,7 @@ class SettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Duplicate number delimiter')
-			.setDesc('文件名与序号之间的分隔符，例如 "-" 会生成 "笔记名-1.png"。')
+			.setDesc('文件名与序号之间的分隔符，例如 "_" 会生成 "笔记名_1.png"。')
 			.addText(text => text
 				.setValue(this.plugin.settings.dupNumberDelimiter)
 				.onChange(async (value) => {
@@ -111,11 +114,23 @@ class SettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Always add duplicate number')
-			.setDesc('若启用，第一张图片也带序号（如 笔记名-1）；否则第一张无序号（笔记名.png），从第二张起为 笔记名-1、笔记名-2…')
+			.setDesc('若启用，所有图片均带序号；否则第一张无序号（笔记名.png），从第二张起编号。')
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.dupNumberAlways)
 				.onChange(async (value) => {
 					this.plugin.settings.dupNumberAlways = value
+					await this.plugin.saveSettings()
+				}
+			))
+
+		new Setting(containerEl)
+			.setName('Number start')
+			.setDesc('序号起始值，默认为 1（生成 笔记名_1、笔记名_2…）。若关闭「始终加序号」，第一张仍无序号，第二张起使用该起始值。')
+			.addText(text => text
+				.setValue(String(this.plugin.settings.numberStart))
+				.onChange(async (value) => {
+					const n = parseInt(value, 10)
+					this.plugin.settings.numberStart = Number.isFinite(n) && n >= 0 ? n : 1
 					await this.plugin.saveSettings()
 				}
 			))
